@@ -2,21 +2,20 @@ name: Build Mihomo.apk
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'
 
 permissions:
   actions: write
   contents: write
 
+env:
+  OPENWRT_VERSION: 25.12.2
+  TARGET_URL: https://downloads.openwrt.org/releases/25.12.2/targets/mediatek/filogic/
+  TARGET_NAME: mt7981_filogic
+
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build mt7981-filogic
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [aarch64_generic, x86_64]
 
     steps:
       - name: Checkout source tree
@@ -27,12 +26,12 @@ jobs:
           TAG=$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/tags" | jq -r '.[0].name' | tr -d 'v')
           echo "TAG=$TAG" >> $GITHUB_ENV
 
-      - name: Check if build already exists for this arch
+      - name: Check if build already exists
         id: check_existing
         run: |
-          if gh release view "v${{ env.TAG }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -q "${{ matrix.arch }}"; then
+          if gh release view "v${{ env.TAG }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -q "${{ env.TARGET_NAME }}"; then
             echo "SKIP_BUILD=true" >> $GITHUB_ENV
-            echo "Skipping build - release v${{ env.TAG }} already contains APK for ${{ matrix.arch }}"
+            echo "Skipping build - release v${{ env.TAG }} already contains APK for ${{ env.TARGET_NAME }}"
           else
             echo "SKIP_BUILD=false" >> $GITHUB_ENV
           fi
@@ -45,7 +44,7 @@ jobs:
           sudo apt update
           sudo apt install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-            python3-setuptools rsync swig unzip zlib1g-dev file wget jq
+            python3-setuptools rsync swig unzip zlib1g-dev file wget jq zstd
 
       - name: Generate build keys
         if: env.SKIP_BUILD != 'true'
@@ -72,34 +71,37 @@ jobs:
       - name: Build
         if: env.SKIP_BUILD != 'true'
         run: |
-          case "${{ matrix.arch }}" in
-            aarch64_generic)
-              TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/rockchip/armv8/"
-              ;;
-            x86_64)
-              TARGET_URL="https://downloads.openwrt.org/releases/25.12.2/targets/x86/64/"
-              ;;
-          esac
+          set -e
 
-          SDK=$(curl -s -L "${TARGET_URL}sha256sums" | grep sdk | sed 's/.* \*//')
-          wget "${TARGET_URL}${SDK}" -O sdk.tar.xz
+          SDK=$(curl -s -L "${{ env.TARGET_URL }}sha256sums" | grep sdk | sed 's/.* \*//')
+          echo "SDK=$SDK"
+
+          wget "${{ env.TARGET_URL }}${SDK}" -O sdk.tar.xz
 
           mkdir sdk
           tar -I zstd -xf sdk.tar.xz --strip-components=1 -C sdk
           cd sdk
+
           ./scripts/feeds update -a
-          wget "${TARGET_URL}config.buildinfo" -O .config
+
+          wget "${{ env.TARGET_URL }}config.buildinfo" -O .config
           make defconfig
+
           cp -a ../net package/
+
           sed -i 's/PKG_VERSION:=stable/PKG_VERSION:=${{ env.TAG }}/g' package/net/mihomo/Makefile
           cat package/net/mihomo/Makefile
+
           make package/net/mihomo/{download,check} FIXUP=1 V=s
           cat package/net/mihomo/Makefile
+
           make package/net/mihomo/compile V=s
 
-          find bin/packages -name '*.apk' -exec sh -c 'mv "$1" "${1%.apk}_${{ matrix.arch }}.apk"' _ {} \;
-          FN=$(find bin/packages -name '*.apk' | sort | head -1 | xargs basename)
+          find bin/packages -name '*.apk' -exec sh -c 'mv "$1" "${1%.apk}_${{ env.TARGET_NAME }}.apk"' _ {} \;
+
+          FN=$(find bin/packages -name 'mihomo*.apk' | sort | head -1 | xargs basename)
           echo "PKG_NAME=$FN" >> $GITHUB_ENV
+
           cd -
 
       - name: Publishing to GitHub Artifacts
@@ -110,7 +112,7 @@ jobs:
           path: |
             sdk/bin/packages/*/*/mihomo*.apk
 
-      - name: Read release.md and use it as a body of new release
+      - name: Read README.md and use it as release body
         if: env.SKIP_BUILD != 'true'
         id: read_release
         shell: bash
@@ -145,6 +147,6 @@ jobs:
 
       - name: Delete old releases
         run: |
-          gh release list --limit 100 | awk 'NR > 2 {print $3}' | xargs -I % gh release delete % --yes --cleanup-tag
+          gh release list --limit 100 | awk 'NR > 2 {print $3}' | xargs -r -I % gh release delete % --yes --cleanup-tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
